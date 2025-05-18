@@ -1,0 +1,14 @@
+services:
+ app:
+  container_name: auth-service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: auth-service
+  ports:
+    - "8080:8080"
+  environment:
+    - ENV=production
+    - GIN_MODE=release
+  working_dir: /app
+  command: ./auth-service

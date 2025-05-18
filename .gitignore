@@ -1,0 +1,44 @@
+# Binaries and build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go specific
+/vendor/
+/go.sum
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment and configuration
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Database
+*.db
+*.sqlite
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Project specific
+tmp/
+dist/
