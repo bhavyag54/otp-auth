@@ -24,7 +24,9 @@ jobs:
       run: docker compose build
 
     - name: Install Railway CLI
-      run: npm install -g railway
+      run: |
+        npm install -g @railway/cli
+        railway version
 
     - name: Deploy to Railway
       env:
