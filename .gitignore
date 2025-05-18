@@ -9,7 +9,7 @@
 
 # Go specific
 /vendor/
-/go.sum
+# /go.sum
 
 # IDE and editor files
 .idea/
