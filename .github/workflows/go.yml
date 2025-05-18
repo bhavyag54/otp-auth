@@ -16,18 +16,7 @@ jobs:
       SVC_ID: otp-auth
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Docker Compose Build
-      run: docker compose build
-
-    - name: Install Railway CLI
-      run: |
-        npm install -g @railway/cli
-        railway version
-
-    - name: Deploy to Railway
-      run: railway up --service=${{ env.SVC_ID }}
+      - uses: action/checkout@v3
+      
+      - name: Deploy to Railway
+        run: railway up --service=${{ env.SVC_ID }}
