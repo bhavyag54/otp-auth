@@ -6,14 +6,15 @@ name: Build and Deploy to Railway
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
 
 jobs:
 
   build-and-deploy:
     runs-on: ubuntu-latest
-    
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      SVC_ID: otp-auth
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
     - uses: actions/checkout@v4
 
@@ -29,6 +30,4 @@ jobs:
         railway version
 
     - name: Deploy to Railway
-      env:
-        RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      run: railway up --service otp-auth
+      run: railway up --service=${{ env.SVC_ID }}
