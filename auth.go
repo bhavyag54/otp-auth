@@ -201,7 +201,7 @@ func login(c *gin.Context) {
 		24*60*60, // 24 hours
 		"/",
 		"",
-		false, // secure
+		true, // secure
 		true, // httpOnly
 	)
 
@@ -212,7 +212,7 @@ func login(c *gin.Context) {
 		30*24*60*60, // 30 days
 		"/",
 		"",
-		false, // secure
+		true, // secure
 		true, // httpOnly
 	)
 
