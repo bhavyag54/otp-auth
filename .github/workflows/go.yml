@@ -1,32 +1,20 @@
 # This workflow will build a golang project
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
 
-name: Build and Deploy to Railway
+name: Deploy to Railway
 
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
 
 jobs:
 
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
-    
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      SVC_ID: otp-auth
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Docker Compose Build
-      run: docker compose build
-
-    - name: Install Railway CLI
-      run: npm install -g railway
-
-    - name: Deploy to Railway
-      env:
-        RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      run: railway up --service otp-auth
+      - uses: actions/checkout@v4
+      - run: railway up --service=${{ env.SVC_ID }}
