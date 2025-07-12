@@ -1,83 +1,62 @@
 package main
 
 import (
-	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
-	"strconv"
 
-	"math/rand"
+	crand "crypto/rand"
+	"encoding/binary"
 
-	"github.com/dgrijalva/jwt-go"
+	mathrand "math/rand"
+
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/joho/godotenv"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 
 	twilio "github.com/twilio/twilio-go"
 	openapi "github.com/twilio/twilio-go/rest/api/v2010"
+
+	"auth-service/backend"
 )
 
-// User represents the user model
-type User struct {
-	gorm.Model
-	Phone        string `gorm:"uniqueIndex"`
-	Email        string `gorm:"uniqueIndex"`
-	OTP          string
-	RefreshToken string
-	IsVerified   bool `gorm:"default:false"`
-}
-
-// TokenResponse represents the response structure for token endpoints
-type TokenResponse struct {
-	Message string `json:"message"`
-}
-
-// LoginRequest represents the login request structure
+// OTPRequest represents the request body for OTP generation
 type OTPRequest struct {
 	Phone string `json:"phone" binding:"required"`
 }
 
-type LoginRequest struct {
-	Otp   string `json:"otp" binding:"required"`
+// ValidateOTPRequest represents the request body for OTP validation
+type ValidateOTPRequest struct {
+	Otp   string `json:"otp"   binding:"required"`
+	Phone string `json:"phone" binding:"required"`
 }
 
 var (
-	db     *gorm.DB
-	jwtKey = []byte(os.Getenv("JWT_SECRET"))
+	otpCache     backend.OTPCache
+	twilioClient *twilio.RestClient
+	fallbackRand *mathrand.Rand
 )
 
 func init() {
 	// Load environment variables
-
 	if os.Getenv("ENV") != "production" {
 		if err := godotenv.Load(); err != nil {
 			log.Println("No .env file found")
 		}
 	}
 
-	// Initialize database connection
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable",
-		os.Getenv("DB_HOST"),
-		os.Getenv("DB_USER"),
-		os.Getenv("DB_PASSWORD"),
-		os.Getenv("DB_NAME"),
-		os.Getenv("DB_PORT"),
-	)
+	// Initialize in-memory OTP cache
+	otpCache = backend.NewMemoryOTPCache()
 
-	var err error
-	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
-	}
+	twilioClient = twilio.NewRestClientWithParams(twilio.ClientParams{
+		Username: os.Getenv("TWILLIO_SID"),
+		Password: os.Getenv("TWILLIO_AUTH_TOKEN"),
+	})
 
-	// Auto migrate the schema
-	db.AutoMigrate(&User{})
+	// Initialize local math/rand generator (used only as crypto fallback)
+	fallbackRand = mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
 }
 
 func main() {
@@ -85,18 +64,9 @@ func main() {
 
 	// Public routes
 	r.POST("/otp", generateOTP)
-	r.POST("/login", login)
+	r.POST("/otp/validate", validateOTP)
 
-	// Protected routes
-	auth := r.Group("/")
-	auth.Use(authMiddleware())
-	{
-		auth.POST("/logout", logout)
-		auth.POST("/refresh", refreshToken)
-		auth.GET("/verify", verifyToken)
-	}
-
-	r.Run(":8080")
+	r.Run(":8000")
 }
 
 func generateOTP(c *gin.Context) {
@@ -106,25 +76,10 @@ func generateOTP(c *gin.Context) {
 		return
 	}
 
-	var user User
-	auth_err := db.Where("phone = ?", req.Phone).First(&user).Error
-	fmt.Println("Error: ", auth_err)
-	fmt.Println("User: ", user)
-	if auth_err != nil {
-		user.Phone = req.Phone
-		user.OTP = ""
-		user.IsVerified = false
-		user.RefreshToken = ""
-		db.Create(&user)
-	}
+	ctx := c.Request.Context()
 
-	client := twilio.NewRestClientWithParams(twilio.ClientParams{
-		Username: os.Getenv("TWILLIO_SID"),
-		Password: os.Getenv("TWILLIO_AUTH_TOKEN"),
-	})
+	otp := generateSecureOTP()
 
-	otp := strconv.Itoa(rand.Intn(9000) + 1000)
-	
 	params := &openapi.CreateMessageParams{}
 	// Ensure phone number is in E.164 format
 	formattedPhone := req.Phone
@@ -133,212 +88,67 @@ func generateOTP(c *gin.Context) {
 	}
 	params.SetTo(formattedPhone)
 	params.SetFrom(os.Getenv("TWILLIO_PHONE"))
-    params.SetBody("Your OTP is: " + otp)
+	params.SetBody("Your OTP is: " + otp)
 
-	_, err := client.Api.CreateMessage(params)
+	_, err := twilioClient.Api.CreateMessage(params)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send OTP: " + err.Error()})
 		return
 	}
 
-	user.OTP = otp
-	db.Save(&user)
-
-	c.SetCookie("phone", req.Phone, 0, "/", "", false, true)
+	// Store OTP in cache
+	if err := otpCache.SetOTP(ctx, req.Phone, otp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store OTP"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "OTP sent successfully"})
 }
 
-func login(c *gin.Context) {
-	var req LoginRequest
+func validateOTP(c *gin.Context) {
+	var req ValidateOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"valid": false, "error": err.Error()})
 		return
 	}
 
-	phone, err := c.Cookie("phone")
+	ctx := c.Request.Context()
+
+	// Retrieve OTP from cache
+	storedOTP, err := otpCache.GetOTP(ctx, req.Phone)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-		return
-	}
-
-	var user User
-	if err := db.Where("phone = ?", phone).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-		return
-	}
-
-	if user.OTP == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-		return
-	}
-
-	if user.OTP != req.Otp {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid OTP"})
-		return
-	}
-
-	user.IsVerified = true
-
-	// Generate tokens
-	accessToken, err := generateAccessToken(user.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		return
-	}
-
-	refreshToken := uuid.New().String()
-
-	// Update user's refresh token
-	user.RefreshToken = refreshToken
-	user.OTP = ""
-	db.Save(&user)
-
-	// Set access token cookie
-	c.SetCookie(
-		"access_token",
-		accessToken,
-		24*60*60, // 24 hours
-		"/",
-		"",
-		true, // secure
-		true, // httpOnly
-	)
-
-	// Set refresh token cookie
-	c.SetCookie(
-		"refresh_token",
-		refreshToken,
-		30*24*60*60, // 30 days
-		"/",
-		"",
-		true, // secure
-		true, // httpOnly
-	)
-
-	c.JSON(http.StatusOK, TokenResponse{
-		Message: "Login successful",
-	})
-}
-
-func logout(c *gin.Context) {
-	userID := c.GetUint("user_id")
-
-	var user User
-	if err := db.First(&user, userID).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to find user"})
-		return
-	}
-
-	// Clear refresh token
-	user.RefreshToken = ""
-	db.Save(&user)
-
-	// Clear cookies
-	c.SetCookie("access_token", "", -1, "/", "", true, true)
-	c.SetCookie("refresh_token", "", -1, "/", "", true, true)
-
-	c.JSON(http.StatusOK, TokenResponse{
-		Message: "Logged out successfully",
-	})
-}
-
-func refreshToken(c *gin.Context) {
-	refreshToken, err := c.Cookie("refresh_token")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Refresh token required"})
-		return
-	}
-
-	var user User
-	if err := db.Where("refresh_token = ?", refreshToken).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
-		return
-	}
-
-	// Generate new tokens
-	accessToken, err := generateAccessToken(user.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		return
-	}
-
-	newRefreshToken := uuid.New().String()
-	user.RefreshToken = newRefreshToken
-	db.Save(&user)
-
-	// Set new access token cookie
-	c.SetCookie(
-		"access_token",
-		accessToken,
-		24*60*60, // 24 hours
-		"/",
-		"",
-		true, // secure
-		true, // httpOnly
-	)
-
-	// Set new refresh token cookie
-	c.SetCookie(
-		"refresh_token",
-		newRefreshToken,
-		30*24*60*60, // 30 days
-		"/",
-		"",
-		true, // secure
-		true, // httpOnly
-	)
-
-	c.JSON(http.StatusOK, TokenResponse{
-		Message: "Tokens refreshed successfully",
-	})
-}
-
-func verifyToken(c *gin.Context) {
-	// If we reach here, the token is already verified by the middleware
-	userID := c.GetUint("user_id")
-	c.JSON(http.StatusOK, gin.H{"user_id": userID})
-}
-
-func generateAccessToken(userID uint) (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": userID,
-		"exp":     time.Now().Add(time.Hour * 24).Unix(),
-	})
-
-	return token.SignedString(jwtKey)
-}
-
-func authMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		tokenString, err := c.Cookie("access_token")
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization cookie required"})
-			c.Abort()
-			return
+		switch err {
+		case backend.ErrOTPExpired:
+			c.JSON(http.StatusBadRequest, gin.H{"valid": false, "error": "OTP has expired"})
+		case backend.ErrOTPNotFound:
+			c.JSON(http.StatusNotFound, gin.H{"valid": false, "error": "OTP not found"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"valid": false, "error": "Internal server error"})
 		}
-
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, errors.New("unexpected signing method")
-			}
-			return jwtKey, nil
-		})
-
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
-			c.Abort()
-			return
-		}
-
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			userID := uint(claims["user_id"].(float64))
-			c.Set("user_id", userID)
-			c.Next()
-		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
-			c.Abort()
-			return
-		}
+		return
 	}
+
+	if storedOTP != req.Otp {
+		c.JSON(http.StatusOK, gin.H{"valid": false, "error": "OTP is incorrect"})
+		return
+	}
+
+	// OTP is valid; delete it to enforce one-time usage
+	if err := otpCache.DeleteOTP(ctx, req.Phone); err != nil {
+		log.Printf("Failed to delete OTP from cache: %v", err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"valid": true})
+}
+
+func generateSecureOTP() string {
+	// Generates a 4-digit OTP using crypto/rand for better security
+	var b [2]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// Fallback to math/rand if crypto/rand fails
+		return strconv.Itoa(1000 + fallbackRand.Intn(9000))
+	}
+	// Convert the random bytes to uint16 and limit to 4-digit range
+	num := binary.BigEndian.Uint16(b[:]) % 9000
+	return strconv.Itoa(int(num) + 1000)
 }

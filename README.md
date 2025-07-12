@@ -1,168 +1,92 @@
-# OTP-Based Authentication Service
+# OTP Authentication Service
 
-A secure authentication service built with Go, Gin, and Twilio that implements OTP (One-Time Password) based authentication using SMS.
+A lightweight Go microservice that delivers SMS-based One-Time Passwords (OTP) using the Gin web framework and Twilio.
 
 ## Features
 
-- Phone number-based authentication using OTP
-- Secure token-based session management
-- JWT-based access tokens
-- Refresh token mechanism
-- Cookie-based token storage
-- PostgreSQL database integration
-- Docker support
+- Phone number-based authentication via SMS OTP
+- Cryptographically secure OTP generation with a deterministic fallback
+- In-memory OTP cache with 5-minute expiry and automatic cleanup
+- Docker & Docker Compose support for easy deployment
 
 ## Prerequisites
 
-- Go 1.24 or higher
-- PostgreSQL database
-- Twilio account with:
-  - Account SID
-  - Auth Token
-  - Twilio Phone Number
+- Go 1.21 or newer (for local development)
+- Twilio account credentials:
+  - **TWILLIO_SID** – Account SID
+  - **TWILLIO_AUTH_TOKEN** – Auth token
+  - **TWILLIO_PHONE** – Verified outbound phone number
 
 ## Environment Variables
 
-Create a `.env` file in the root directory with the following variables:
+Create a `.env` file in the project root:
 
 ```env
-# Database Configuration
-DB_HOST=localhost
-DB_USER=your_db_user
-DB_PASSWORD=your_db_password
-DB_NAME=your_db_name
-DB_PORT=5432
-
-# JWT Configuration
-JWT_SECRET=your_jwt_secret_key
-
-# Twilio Configuration
+# Twilio
 TWILLIO_SID=your_twilio_account_sid
 TWILLIO_AUTH_TOKEN=your_twilio_auth_token
-TWILLIO_PHONE=your_twilio_phone_number
+TWILLIO_PHONE=+1234567890
 
-# Environment
+# Application
 ENV=development
+GIN_MODE=debug
 ```
 
-## API Endpoints
+## API
 
-### Public Endpoints
+### 1. Generate OTP
 
-1. **Generate OTP**
-   ```http
-   POST /otp
-   Content-Type: application/json
+```http
+POST /otp
+Content-Type: application/json
 
-   {
-     "phone": "1234567890"
-   }
-   ```
-   - Sends an OTP to the provided phone number
-   - Phone number should be in E.164 format (e.g., +1234567890)
+{
+  "phone": "+1234567890"
+}
+```
+Response – **200 OK**
+```json
+{ "message": "OTP sent successfully" }
+```
 
-2. **Login with OTP**
-   ```http
-   POST /login
-   Content-Type: application/json
+### 2. Validate OTP
 
-   {
-     "otp": "1234"
-   }
-   ```
-   - Verifies the OTP and issues access and refresh tokens
-   - Requires a valid phone cookie from the OTP generation step
+```http
+POST /otp/validate
+Content-Type: application/json
 
-### Protected Endpoints
+{
+  "phone": "+1234567890",
+  "otp": "1234"
+}
+```
+Possible responses
 
-All protected endpoints require a valid access token in the cookie.
-
-1. **Logout**
-   ```http
-   POST /logout
-   ```
-   - Invalidates the current session
-   - Clears access and refresh tokens
-
-2. **Refresh Token**
-   ```http
-   POST /refresh
-   ```
-   - Issues new access and refresh tokens
-   - Requires a valid refresh token
-
-3. **Verify Token**
-   ```http
-   GET /verify
-   ```
-   - Verifies the current access token
-   - Returns the user ID if valid
+| Status | Body | Description |
+| ------ | ---- | ----------- |
+| 200 | `{ "valid": true }` | OTP is correct |
+| 400 | `{ "valid": false, "error": "OTP has expired" \| "OTP is incorrect" }` | Expired or wrong OTP |
+| 404 | `{ "valid": false, "error": "OTP not found" }` | No OTP issued for the phone |
+| 500 | `{ "valid": false, "error": "Internal server error" }` | Unexpected failure |
 
 ## Running the Service
 
 ### Local Development
 
-1. Install dependencies:
-   ```bash
-   go mod download
-   ```
-
-2. Run the service:
-   ```bash
-   go run auth.go
-   ```
+```bash
+go mod download
+go run auth.go   # service listens on :8000
+```
 
 ### Docker
 
-#### Using Docker Compose (Recommended)
-
-1. Make sure your `.env` file is properly configured with all required variables
-
-2. Run the service:
-   ```bash
-   docker-compose up --build
-   ```
-
-   To run in detached mode:
-   ```bash
-   docker-compose up -d --build
-   ```
-
-3. To stop the service:
-   ```bash
-   docker-compose down
-   ```
-
-#### Using Docker Directly
-
-1. Build the Docker image:
-   ```bash
-   docker build -t auth-service .
-   ```
-
-2. Run the container:
-   ```bash
-   docker run -p 8080:8080 --env-file .env auth-service
-   ```
-
-## Security Features
-
-- OTP expiration
-- Secure cookie settings
-- JWT token expiration
-- Refresh token rotation
-- Phone number verification
-- HTTP-only cookies
-- Secure password hashing
-
-## Error Handling
-
-The service returns appropriate HTTP status codes and error messages:
-
-- 400: Bad Request
-- 401: Unauthorized
-- 500: Internal Server Error
+```bash
+docker-compose up --build  # maps :8000 -> :8000 by default
+# or
+docker build -t auth-service .
+docker run -p 8000:8000 --env-file .env auth-service
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+MIT 
